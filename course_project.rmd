@@ -1,0 +1,163 @@
+---
+title: "Weight Lifting Data Analysis Report"
+author: "Jane Tsai (janet.tsai@gmail.com)"
+date: "December 21, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(caret)
+require(ElemStatLearn)
+require(gbm)
+require(rpart)
+require(lubridate)
+require(forecast)
+require(e1071)
+require(dplyr)
+require(ada)
+require(randomForest)
+require(party)
+require(rfUtilities)
+```
+
+# Executive Summary
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. In this project, our goal will be to use data from accelerometers to predict how well they perform on the belt, forearm, arm, and dumbbell activities. 
+
+# Exploratory Data Analysis
+
+We downloaded the data from the website referenced in [ref 1], and perform some exploratory data analysis.
+We have 19622 samples for training, 20 samples for test data set. There are totally 159 variables, one outcome variable (classe for the training dataset). The classe variable "A" means the subject perform well, while "B", "C", "D", and "E" means the subject does not perform well. After drawing the histogram, we can see that out of 19622 samples, the class A activities has the highest count (5580) while class D activities has lowest count(3216).
+
+```{r explorotary_data, warning=FALSE, echo=TRUE}
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", "train.csv", method="libcurl");
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", "test.csv", method="libcurl");
+trainDS <- read.csv("train.csv", header=TRUE, sep=",")
+testDS <- read.csv("test.csv", header=TRUE, sep=",")
+summary(trainDS$classe)
+cnames <- names(trainDS)
+aggTrainDS <- trainDS %>%
+    select(classe) %>%
+    mutate(classV = case_when(
+      classe == 'A' ~ 1,
+      classe == 'B' ~ 2,
+      classe == 'C' ~ 3,
+      classe == 'D' ~ 4,
+      classe == 'E' ~ 5,
+      TRUE ~ as.numeric(0)
+    ))  %>%
+    group_by(classe, classV) %>%
+    summarise(countV = n())
+
+ggplot(data=aggTrainDS) + 
+    geom_bar(aes(x=classe,y=countV, colour=classe, fill=classe), stat="identity", width=0.2)
+   
+```
+
+# Data Preprocessing and feature selection
+After examine the dataset, we try to determine which variables can be used to  train a model to predict the outcome. We first examine the columns in the training data set, and found there are a lot of nulls in some of the columns and rows.  Out of 19622 rows, only 406 rows has valid data for all columns.  Those valid rows seems to be the rows that has the new_window variable == "yes". 
+
+```{r complete_cases}
+sum(complete.cases(trainDS))
+summary(trainDS$new_window)
+```
+
+We do not want to use samples contains NA data since it won't give us too much insights. We will try to exclude those columns that has NA data. In additionally, the first 7 variables: "X", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "new_window", and "num_window" are not measurement data, so we will excluded them too. Some columns have duplicate info, i.e. stddev and var, skewness provided the statistics information but since we have raw data, we can omit those. 
+Since some column seems have invalid dat a "Div#0!" we will exclude those too.
+
+```{r feature_selection, echo=TRUE, warning=FALSE}
+rawFeatureNames <- names(trainDS)
+rNum <- dim(trainDS)[1]
+cNum <- dim(trainDS)[2]
+cIndices <- {} 
+for (i  in 8:cNum) {
+    if (sum(is.na(trainDS[, i]))==0)
+    {
+        # take only the raw column, not the statistics column
+        name <- rawFeatureNames[i]
+        if ( length(grep("skewness", name)) == 0 &
+             length(grep("var", name)) == 0 &
+             length(grep("min", name)) == 0 &
+             length(grep("max", name)) == 0)
+        {
+            if (class(trainDS[,i]) != "factor")
+            {
+                cIndices <- c(cIndices, i)
+            }
+            if (name == "classe")
+                cIndices <- c(cIndices, i)
+        }
+        
+    }
+        
+}
+finalTrainDS <- trainDS %>%
+    select(cIndices)
+finalTestDS <- testDS %>%
+    select(cIndices)
+```
+
+After final selection, we come down to 19622 rows and 53 (52 predictors and 1 outcome) columns for the preprocessed dataset. 
+
+```{r final_train_ds}
+dim(finalTrainDS)
+finalFeatures <- names(finalTrainDS)
+print(finalFeatures)
+```
+
+## Building Classification Model 
+
+According to the ref[2], we will use randomForest to train a predictive model. This algorithm ischaracterized by a subset of features, selected in a random
+and independent manner with the same distribution for each of the trees in the forest. We will use 5 folds cross validation and average the prediction error rate out of all the model trained. In train control, we specifyh cross-validation portion to 0.75 (75% will be used for train while 25% will be used for cross-validation).
+
+```{r train_model_ada, echo= TRUE, warning=FALSE}
+
+
+set.seed(647)
+myTrControl <- trainControl(method = "repeatedcv",
+                            number = 5,
+                            repeats = 1,
+                            p = 0.75,
+                            classProbs = FALSE,
+                            verboseIter = TRUE)
+mtry <- sqrt(ncol(finalTrainDS))
+tunegrid <- expand.grid(.mtry=mtry)
+results_model <- train(x = finalTrainDS[, c(1:52)], finalTrainDS[,53], method="rf",trControl=myTrControl,tuneLength=1, tuneGrid=tunegrid)
+
+```
+
+The confusionMatrix looks good. we have 2.68% prediction error.
+
+```{r confusion_matrix}
+print(results_model)
+```
+
+### Variable importance
+To obtain which variables are more important, we use the following function varImp to check the model, and order the importance desc. We can see roll_belt, yaw_belt, pitch_forearm are the top 3 important variables. We draw the top 20 variables descendent via importance in the following graph.
+
+```{r var_importance, fig.width=6, fig.height=4}
+varImpMatrix <- varImp(results_model)
+var <- rownames(varImpMatrix[[1]])
+imp <- varImpMatrix[[1]][,1]
+v <- cbind(var, imp)
+dfImp <- as.data.frame(v)
+dfImp[,2]  <- as.numeric(as.character(dfImp[,2]))
+oDf <- arrange(dfImp, desc(imp))
+oDf$var <- factor(oDf$var, levels = oDf$var[order(oDf$imp)])
+ggplot(data=oDf[1:10,], aes(y=imp, x=var)) + 
+    geom_bar(colour="black", fill="lightblue", stat="identity", width=0.2) +
+    coord_flip()
+
+```
+
+To predict the test dataset's 20 samples, we will apply the model and run caret package predict function.
+
+```{r prediction}
+finalPredict <- predict(results_model, newdata=finalTestDS)
+finalPredict
+```
+```
+### Appendix 
+[ref1] http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har
+[ref2] Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
