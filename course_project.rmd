@@ -127,10 +127,10 @@ results_model <- train(x = finalTrainDS[, c(1:52)], finalTrainDS[,53], method="r
 
 ```
 
-The confusionMatrix looks good. we have 2.68% prediction error.
+The confusionMatrix looks good. we have 99.57% prediction accuracy.
 
 ```{r confusion_matrix}
-print(results_model)
+confusionMatrix(results_model)
 ```
 
 ### Variable importance
